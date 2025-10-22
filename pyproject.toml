@@ -1,7 +1,17 @@
 [project]
 name = "bat-classifier"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-label audio tagging system for ultrasonic bat recordings using PyTorch and Multiple-Instance Learning"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "librosa>=0.10.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pyyaml>=6.0",
+    "wandb>=0.15.0",
+    "scikit-learn>=1.3.0",
+    "soundfile>=0.12.0",
+]

@@ -1,0 +1,78 @@
+# Configuration file for bat audio classification system
+
+# Data parameters
+data:
+  sample_rate: 384000  # 384 kHz for ultrasonic bat recordings
+  n_mels: 128  # Number of mel filterbanks
+  n_fft: 2048  # FFT window size
+  hop_length: 512  # Hop length for STFT
+  fmin: 10000  # Minimum frequency (10 kHz) - ultrasonic band
+  fmax: 100000  # Maximum frequency (100 kHz) - ultrasonic band
+  clip_duration: 5.0  # Duration of each audio clip in seconds
+  bag_size: 10  # Number of instances (frames) per bag/clip
+  num_classes: 20  # Number of bat species
+
+# Model parameters
+model:
+  pooling_type: "linear_softmax"  # Options: "linear_softmax", "attention", "max"
+  conv_layers:
+    - filters: 64
+      kernel_size: [3, 3]
+      stride: [1, 1]
+      padding: [1, 1]
+    - filters: 128
+      kernel_size: [3, 3]
+      stride: [1, 1]
+      padding: [1, 1]
+    - filters: 256
+      kernel_size: [3, 3]
+      stride: [1, 1]
+      padding: [1, 1]
+  pool_size: [2, 2]  # Max pooling size
+  rnn_hidden_size: 128  # Hidden size for BiGRU
+  rnn_num_layers: 2  # Number of RNN layers
+  dropout: 0.5  # Dropout rate
+
+# Training parameters
+training:
+  batch_size: 8
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adam"  # Optimizer type
+  scheduler: "step"  # Options: "step", "cosine", "none"
+  step_size: 30  # For StepLR scheduler
+  gamma: 0.1  # Learning rate decay factor
+  patience: 10  # Early stopping patience
+  class_weights: null  # Optional class weights for BCEWithLogitsLoss (list or null)
+
+# Augmentation parameters
+augmentation:
+  time_masking: true
+  time_mask_param: 20
+  freq_masking: true
+  freq_mask_param: 10
+  noise_injection: true
+  noise_std: 0.01
+
+# Paths
+paths:
+  data_dir: "./data"  # Directory containing WAV files
+  train_csv: "./data/train.csv"  # CSV with training file paths and labels
+  val_csv: "./data/val.csv"  # CSV with validation file paths and labels
+  test_csv: "./data/test.csv"  # CSV with test file paths and labels
+  checkpoint_dir: "./checkpoints"  # Directory to save model checkpoints
+  log_dir: "./logs"  # Directory for logs
+
+# Wandb parameters
+wandb:
+  enabled: true
+  project: "bat-classification"
+  entity: null  # Your wandb entity (username or team)
+  run_name: null  # Will be auto-generated if null
+  tags: ["mil", "audio", "bat", "ultrasonic"]
+
+# Device and reproducibility
+device: "cuda"  # Options: "cuda", "cpu", "mps"
+seed: 42
+num_workers: 4  # Number of workers for DataLoader
