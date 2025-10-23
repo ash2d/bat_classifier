@@ -1,78 +1,180 @@
-# Configuration file for bat audio classification system
+# Configuration for Bat Audio MIL Classifier
+# ==============================================================================
+# This file contains all hyperparameters and settings for the multi-label
+# audio tagging system. Adjust the values below to match your dataset and
+# experimental setup.
 
-# Data parameters
+# Dataset Configuration
+# ------------------------------------------------------------------------------
 data:
-  sample_rate: 384000  # 384 kHz for ultrasonic bat recordings
-  n_mels: 128  # Number of mel filterbanks
-  n_fft: 2048  # FFT window size
-  hop_length: 512  # Hop length for STFT
-  fmin: 10000  # Minimum frequency (10 kHz) - ultrasonic band
-  fmax: 100000  # Maximum frequency (100 kHz) - ultrasonic band
-  clip_duration: 5.0  # Duration of each audio clip in seconds
-  bag_size: 10  # Number of instances (frames) per bag/clip
-  num_classes: 20  # Number of bat species
+  # TODO: Set these paths to point to your actual dataset
+  train_manifest: "path/to/train.csv"  # CSV with columns: filepath, labels
+  val_manifest: "path/to/val.csv"      # CSV with columns: filepath, labels
+  audio_root: "path/to/audio/clips"    # Root directory containing WAV files
+  
+  # Label Configuration
+  # TODO: Update this list with your actual bat species names
+  # The order here defines the class indices
+  classes:
+    - "species_1"
+    - "species_2"
+    - "species_3"
+    - "species_4"
+    - "species_5"
+    - "species_6"
+    - "species_7"
+    - "species_8"
+    - "species_9"
+    - "species_10"
+    - "species_11"
+    - "species_12"
+    - "species_13"
+    - "species_14"
+    - "species_15"
+    - "species_16"
+    - "species_17"
+    - "species_18"
+    - "species_19"
+    - "species_20"
+  
+  label_delimiter: ","  # Delimiter used in the labels column
 
-# Model parameters
+# Audio Processing Configuration
+# ------------------------------------------------------------------------------
+audio:
+  sample_rate: 384000  # Hz - typical for ultrasonic bat recordings
+  clip_duration: 5.0   # seconds - each audio clip duration
+  
+  # Spectrogram Parameters
+  # TODO: Adjust these for optimal ultrasonic frequency resolution
+  n_mels: 128          # Number of mel frequency bins
+  n_fft: 2048          # FFT window size (adjust for time/freq resolution)
+  hop_length: 512      # Hop length for STFT
+  f_min: 10000.0       # Hz - minimum frequency (ultrasonic range start)
+  f_max: 100000.0      # Hz - maximum frequency (ultrasonic range end)
+  
+  # PCEN (Per-Channel Energy Normalization) Parameters
+  # TODO: Fine-tune these based on your recording characteristics
+  pcen:
+    time_constant: 0.4  # Time constant for temporal smoothing
+    gain: 0.8           # Compression gain
+    bias: 10.0          # Bias term
+    power: 0.25         # Compression power
+    eps: 1.0e-6         # Small constant for numerical stability
+
+# Multiple Instance Learning Configuration
+# ------------------------------------------------------------------------------
+mil:
+  bag_size: 32           # Maximum number of instances per bag (clip)
+  instance_frames: 64    # Number of time frames per instance
+  instance_hop_frames: 32  # Hop between instances (set = instance_frames for no overlap)
+  random_crop: false     # Whether to randomly crop audio during training
+
+# Model Architecture Configuration
+# ------------------------------------------------------------------------------
 model:
-  pooling_type: "linear_softmax"  # Options: "linear_softmax", "attention", "max"
-  conv_layers:
-    - filters: 64
-      kernel_size: [3, 3]
-      stride: [1, 1]
-      padding: [1, 1]
-    - filters: 128
-      kernel_size: [3, 3]
-      stride: [1, 1]
-      padding: [1, 1]
-    - filters: 256
-      kernel_size: [3, 3]
-      stride: [1, 1]
-      padding: [1, 1]
-  pool_size: [2, 2]  # Max pooling size
-  rnn_hidden_size: 128  # Hidden size for BiGRU
-  rnn_num_layers: 2  # Number of RNN layers
-  dropout: 0.5  # Dropout rate
+  # CRNN Encoder Configuration
+  encoder:
+    input_channels: 1    # Number of input channels (1 for mono spectrogram)
+    
+    # Convolutional Layers Configuration
+    # TODO: Adjust architecture complexity based on your data
+    conv_layers:
+      - out_channels: 32
+        kernel_size: [3, 3]
+        pool_size: [2, 2]
+      - out_channels: 64
+        kernel_size: [3, 3]
+        pool_size: [2, 2]
+      - out_channels: 128
+        kernel_size: [3, 3]
+        pool_size: [2, 2]
+      - out_channels: 256
+        kernel_size: [3, 3]
+        pool_size: [2, 2]
+    
+    # Recurrent Layer Configuration
+    rnn_hidden_size: 256      # Hidden size of GRU/LSTM
+    rnn_num_layers: 2         # Number of recurrent layers
+    rnn_dropout: 0.3          # Dropout between RNN layers
+    bidirectional: true       # Use bidirectional GRU
+  
+  # MIL Pooling Head Configuration
+  pooling:
+    pooling_type: "linear_softmax"  # Options: "linear_softmax", "attention", "max"
+    attention_hidden: 128            # Hidden size for attention mechanism (if used)
+    dropout: 0.1                     # Dropout rate in pooling head
 
-# Training parameters
+# Training Configuration
+# ------------------------------------------------------------------------------
 training:
-  batch_size: 8
-  epochs: 100
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  optimizer: "adam"  # Optimizer type
-  scheduler: "step"  # Options: "step", "cosine", "none"
-  step_size: 30  # For StepLR scheduler
-  gamma: 0.1  # Learning rate decay factor
-  patience: 10  # Early stopping patience
-  class_weights: null  # Optional class weights for BCEWithLogitsLoss (list or null)
+  # Optimization
+  batch_size: 8          # Batch size for training
+  num_epochs: 100        # Total number of training epochs
+  learning_rate: 0.0001  # Initial learning rate
+  weight_decay: 0.0001   # L2 regularization strength
+  
+  # Learning Rate Scheduler
+  scheduler:
+    type: "ReduceLROnPlateau"  # Options: "ReduceLROnPlateau", "StepLR", "CosineAnnealingLR"
+    patience: 10                # Epochs to wait before reducing LR (for ReduceLROnPlateau)
+    factor: 0.5                 # Factor by which to reduce LR
+    min_lr: 1.0e-7              # Minimum learning rate
+  
+  # Loss Function Configuration
+  loss:
+    type: "BCEWithLogitsLoss"
+    # TODO: Optionally provide class weights for imbalanced datasets
+    # Format: list of floats with length = number of classes
+    class_weights: null  # Example: [1.0, 2.5, 1.5, ...] or null for no weights
+  
+  # Regularization and Augmentation
+  # TODO: Add audio augmentation pipeline if desired
+  augmentations:
+    use_mixup: false         # Apply mixup augmentation
+    mixup_alpha: 0.4         # Mixup alpha parameter
+    use_specaugment: false   # Apply SpecAugment
+  
+  # Checkpointing
+  checkpoint_dir: "checkpoints"  # Directory to save model checkpoints
+  save_best_only: true           # Only save checkpoint when validation improves
+  
+  # Early Stopping
+  early_stopping:
+    enabled: true
+    patience: 20          # Epochs to wait for improvement before stopping
+    min_delta: 0.0001     # Minimum change to qualify as improvement
 
-# Augmentation parameters
-augmentation:
-  time_masking: true
-  time_mask_param: 20
-  freq_masking: true
-  freq_mask_param: 10
-  noise_injection: true
-  noise_std: 0.01
+# Evaluation Configuration
+# ------------------------------------------------------------------------------
+evaluation:
+  batch_size: 16                # Batch size for evaluation
+  threshold: 0.5                # Classification threshold for metrics
+  compute_roc_auc: true         # Whether to compute ROC-AUC metrics
+  save_predictions: true        # Save predictions to file
+  predictions_path: "predictions.csv"  # Path to save predictions
 
-# Paths
-paths:
-  data_dir: "./data"  # Directory containing WAV files
-  train_csv: "./data/train.csv"  # CSV with training file paths and labels
-  val_csv: "./data/val.csv"  # CSV with validation file paths and labels
-  test_csv: "./data/test.csv"  # CSV with test file paths and labels
-  checkpoint_dir: "./checkpoints"  # Directory to save model checkpoints
-  log_dir: "./logs"  # Directory for logs
+# Logging Configuration
+# ------------------------------------------------------------------------------
+logging:
+  # Weights & Biases Configuration
+  # TODO: Set your wandb project name and entity
+  use_wandb: true
+  wandb_project: "bat-classifier"  # Your wandb project name
+  wandb_entity: null               # Your wandb username/team (null = default)
+  # TODO: Set WANDB_API_KEY environment variable or use wandb.login() in code
+  
+  # Console Logging
+  log_interval: 10     # Log training metrics every N batches
+  verbose: true        # Print detailed logs to console
 
-# Wandb parameters
-wandb:
-  enabled: true
-  project: "bat-classification"
-  entity: null  # Your wandb entity (username or team)
-  run_name: null  # Will be auto-generated if null
-  tags: ["mil", "audio", "bat", "ultrasonic"]
-
-# Device and reproducibility
-device: "cuda"  # Options: "cuda", "cpu", "mps"
-seed: 42
-num_workers: 4  # Number of workers for DataLoader
+# System Configuration
+# ------------------------------------------------------------------------------
+system:
+  device: "cuda"       # Device to use: "cuda", "cpu", or "cuda:0", "cuda:1", etc.
+  num_workers: 4       # Number of data loading workers
+  seed: 42             # Random seed for reproducibility
+  pin_memory: true     # Pin memory for faster GPU transfer
+  
+  # Mixed Precision Training
+  use_amp: false       # Use automatic mixed precision (requires PyTorch >= 1.6)
