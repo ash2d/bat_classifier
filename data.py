@@ -1,321 +1,190 @@
-"""
-Data loading and preprocessing for bat audio classification.
-"""
+"""Data loading utilities for the bat audio MIL project.
 
-import os
+Fill in dataset-specific parameters (paths, metadata schema, augmentation pipeline)
+as noted in docstrings before running training.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
 import pandas as pd
-import numpy as np
 import torch
 import torchaudio
-import librosa
-from torch.utils.data import Dataset, DataLoader
-from typing import Tuple, Optional, List
+from torch import nn
+from torch.utils.data import Dataset
+
+
+@dataclass
+class BatDatasetConfig:
+    """Lightweight container for dataset-related settings.
+
+    Add any additional fields that must mirror values stored in ``config.yaml``
+    (e.g., ``instance_hop_frames``) so that the dataset stays in sync with the
+    experiment configuration.
+    """
+
+    sample_rate: int
+    n_mels: int
+    bag_size: int
+    instance_frames: int
+    f_min: float
+    f_max: float
+    pcen_time_constant: float
+    pcen_gain: float
+    pcen_bias: float
+    pcen_power: float
+    pcen_eps: float
+    clip_duration: float
+    random_crop: bool = False
+    augmentations: Optional[Callable] = None
 
 
 class BatClipDataset(Dataset):
+    """Dataset returning MIL bags of PCEN spectrogram instances and multi-hot labels.
+
+    Expected manifest CSV columns (adjust as needed):
+        - ``filepath``: relative or absolute path to a WAV file.
+        - ``labels``: a string containing comma-separated class ids or names.
+
+    Update ``_parse_labels`` if your label storage differs, and set the paths to
+    ``manifest_path`` and ``audio_root`` in ``train.py`` / ``evaluate.py``.
     """
-    Custom Dataset class for bat audio clips with weak multi-label supervision.
-    
-    Each audio clip is treated as a bag of instances (frames) for Multiple-Instance Learning.
-    """
-    
+
     def __init__(
         self,
-        csv_path: str,
-        data_dir: str,
-        config: dict,
-        transform: Optional[callable] = None,
-        train: bool = True,
-    ):
-        """
-        Args:
-            csv_path: Path to CSV file with columns [filename, species1, species2, ...]
-            data_dir: Root directory containing audio files
-            config: Configuration dictionary
-            transform: Optional transform to apply to spectrograms
-            train: Whether this is training data (for augmentation)
-        """
-        self.data_dir = data_dir
+        manifest_path: str,
+        audio_root: str,
+        label_to_index: Dict[str, int],
+        config: BatDatasetConfig,
+        label_delimiter: str = ",",
+        instance_hop_frames: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        self.manifest_path = manifest_path  # TODO: Point to your train/val CSV.
+        self.audio_root = audio_root  # TODO: Point to directory with WAV clips.
+        self.label_to_index = label_to_index
         self.config = config
-        self.transform = transform
-        self.train = train
-        
-        # Load CSV with file paths and labels
-        self.df = pd.read_csv(csv_path)
-        
-        # Extract configuration parameters
-        self.sample_rate = config['data']['sample_rate']
-        self.n_mels = config['data']['n_mels']
-        self.n_fft = config['data']['n_fft']
-        self.hop_length = config['data']['hop_length']
-        self.fmin = config['data']['fmin']
-        self.fmax = config['data']['fmax']
-        self.clip_duration = config['data']['clip_duration']
-        self.bag_size = config['data']['bag_size']
-        self.num_classes = config['data']['num_classes']
-        
-        # Augmentation parameters
-        self.augmentation = config.get('augmentation', {})
-        
-    def __len__(self) -> int:
-        """Return the number of clips in the dataset."""
-        return len(self.df)
-    
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Get a single clip and its labels.
-        
-        Args:
-            idx: Index of the clip
-            
-        Returns:
-            Tuple of (instances_tensor, label_tensor)
-            - instances_tensor: (T, F) where T is number of instances, F is feature dimension
-            - label_tensor: (C,) multi-hot label vector
-        """
-        # Get file path and labels
-        row = self.df.iloc[idx]
-        filename = row['filename']
-        filepath = os.path.join(self.data_dir, filename)
-        
-        # Extract labels (assuming columns after 'filename' are species labels)
-        label_columns = [col for col in self.df.columns if col != 'filename']
-        labels = row[label_columns].values.astype(np.float32)
-        label_tensor = torch.from_numpy(labels)
-        
-        # Load audio
-        waveform, sr = torchaudio.load(filepath)
-        
-        # Resample if necessary
-        if sr != self.sample_rate:
-            resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
-            waveform = resampler(waveform)
-        
-        # Convert to mono if stereo
-        if waveform.shape[0] > 1:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
-        
-        # Ensure fixed duration
-        target_length = int(self.clip_duration * self.sample_rate)
-        if waveform.shape[1] < target_length:
-            # Pad if too short
-            padding = target_length - waveform.shape[1]
-            waveform = torch.nn.functional.pad(waveform, (0, padding))
-        elif waveform.shape[1] > target_length:
-            # Truncate if too long
-            waveform = waveform[:, :target_length]
-        
-        # Compute mel spectrogram
-        mel_spec = self._compute_mel_spectrogram(waveform)
-        
-        # Compute PCEN (Per-Channel Energy Normalization)
-        pcen_spec = self._compute_pcen(mel_spec)
-        
-        # Apply augmentation if training
-        if self.train:
-            pcen_spec = self._apply_augmentation(pcen_spec)
-        
-        # Split into instances (frames)
-        instances = self._split_into_instances(pcen_spec)
-        
-        # Apply optional transform
-        if self.transform is not None:
-            instances = self.transform(instances)
-        
-        return instances, label_tensor
-    
-    def _compute_mel_spectrogram(self, waveform: torch.Tensor) -> torch.Tensor:
-        """
-        Compute mel spectrogram from waveform.
-        
-        Args:
-            waveform: Audio waveform tensor (1, L)
-            
-        Returns:
-            Mel spectrogram tensor (n_mels, T)
-        """
-        mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=self.sample_rate,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            n_mels=self.n_mels,
-            f_min=self.fmin,
-            f_max=self.fmax,
+        self.label_delimiter = label_delimiter
+        self.instance_hop_frames = instance_hop_frames or config.instance_frames
+        self.mel_spec = torchaudio.transforms.MelSpectrogram(
+            sample_rate=config.sample_rate,
+            n_mels=config.n_mels,
+            n_fft=2048,  # TODO: Adjust FFT size for ultrasonic range resolution.
+            hop_length=512,  # TODO: Match hop_length to time resolution needs.
+            f_min=config.f_min,
+            f_max=config.f_max,
+            center=True,
+            pad_mode="reflect",
+            power=1.0,
         )
-        
-        mel_spec = mel_transform(waveform)
-        mel_spec = mel_spec.squeeze(0)  # Remove channel dimension
-        
-        # Convert to log scale
-        mel_spec = torch.log(mel_spec + 1e-9)
-        
-        return mel_spec
-    
-    def _compute_pcen(self, mel_spec: torch.Tensor) -> torch.Tensor:
-        """
-        Compute Per-Channel Energy Normalization (PCEN).
-        
-        PCEN is a robust frontend for neural network audio models.
-        For simplicity, this is a placeholder - you can implement full PCEN here.
-        
-        Args:
-            mel_spec: Mel spectrogram (n_mels, T)
-            
-        Returns:
-            PCEN-normalized spectrogram (n_mels, T)
-        """
-        # Placeholder: Simple normalization
-        # Full PCEN involves adaptive gain control and compression
-        # You can implement librosa.pcen or torchaudio.functional.pcen here
-        
-        # For now, apply per-frequency normalization
-        mean = mel_spec.mean(dim=1, keepdim=True)
-        std = mel_spec.std(dim=1, keepdim=True)
-        pcen_spec = (mel_spec - mean) / (std + 1e-9)
-        
-        return pcen_spec
-    
-    def _apply_augmentation(self, spec: torch.Tensor) -> torch.Tensor:
-        """
-        Apply data augmentation to spectrogram.
-        
-        Args:
-            spec: Spectrogram tensor (F, T)
-            
-        Returns:
-            Augmented spectrogram (F, T)
-        """
-        # Time masking
-        if self.augmentation.get('time_masking', False):
-            time_mask_param = self.augmentation.get('time_mask_param', 20)
-            time_mask = torchaudio.transforms.TimeMasking(time_mask_param)
-            spec = spec.unsqueeze(0)  # Add channel dimension
-            spec = time_mask(spec)
-            spec = spec.squeeze(0)
-        
-        # Frequency masking
-        if self.augmentation.get('freq_masking', False):
-            freq_mask_param = self.augmentation.get('freq_mask_param', 10)
-            freq_mask = torchaudio.transforms.FrequencyMasking(freq_mask_param)
-            spec = spec.unsqueeze(0)  # Add channel dimension
-            spec = freq_mask(spec)
-            spec = spec.squeeze(0)
-        
-        # Noise injection
-        if self.augmentation.get('noise_injection', False):
-            noise_std = self.augmentation.get('noise_std', 0.01)
-            noise = torch.randn_like(spec) * noise_std
-            spec = spec + noise
-        
-        return spec
-    
+        self.pcen = torchaudio.transforms.PCEN(
+            sr=config.sample_rate,
+            trainable=False,
+            time_constant=config.pcen_time_constant,
+            gain=config.pcen_gain,
+            bias=config.pcen_bias,
+            power=config.pcen_power,
+            eps=config.pcen_eps,
+        )
+        self.df = pd.read_csv(self.manifest_path)
+        if "filepath" not in self.df.columns:
+            raise ValueError("Manifest must include a 'filepath' column.")
+        if "labels" not in self.df.columns:
+            raise ValueError("Manifest must include a 'labels' column.")
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        row = self.df.iloc[index]
+        audio_path = self._resolve_audio_path(row["filepath"])
+        waveform, sr = torchaudio.load(audio_path)
+        waveform = self._prepare_waveform(waveform, sr)
+        spec = self._compute_pcen_spectrogram(waveform)
+        instances = self._split_into_instances(spec)
+        labels = self._parse_labels(row["labels"])
+        return instances, labels
+
+    def _resolve_audio_path(self, relative_path: str) -> str:
+        # Replace with dataset-specific path handling (e.g., pathlib joining).
+        return f"{self.audio_root}/{relative_path}"
+
+    def _prepare_waveform(self, waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        if waveform.ndim > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        if sample_rate != self.config.sample_rate:
+            waveform = torchaudio.functional.resample(
+                waveform,
+                orig_freq=sample_rate,
+                new_freq=self.config.sample_rate,
+            )
+        target_num_samples = int(self.config.sample_rate * self.config.clip_duration)
+        if waveform.size(-1) < target_num_samples:
+            pad_amount = target_num_samples - waveform.size(-1)
+            waveform = torch.nn.functional.pad(waveform, (0, pad_amount))
+        elif waveform.size(-1) > target_num_samples:
+            if self.config.random_crop:
+                start = torch.randint(0, waveform.size(-1) - target_num_samples + 1, (1,)).item()
+                waveform = waveform[..., start : start + target_num_samples]
+            else:
+                waveform = waveform[..., :target_num_samples]
+        return waveform
+
+    def _compute_pcen_spectrogram(self, waveform: torch.Tensor) -> torch.Tensor:
+        spec = self.mel_spec(waveform)
+        spec = self.pcen(spec)
+        spec = torch.log1p(spec)
+        return spec.squeeze(0)
+
     def _split_into_instances(self, spec: torch.Tensor) -> torch.Tensor:
-        """
-        Split spectrogram into fixed number of instances (frames).
-        
-        Args:
-            spec: Spectrogram tensor (F, T)
-            
-        Returns:
-            Instances tensor (bag_size, F * instance_width)
-        """
-        freq_bins, time_bins = spec.shape
-        
-        # Calculate instance width
-        instance_width = time_bins // self.bag_size
-        
-        instances = []
-        for i in range(self.bag_size):
-            start = i * instance_width
-            end = start + instance_width
-            
-            # Handle last instance
-            if i == self.bag_size - 1:
-                end = time_bins
-            
-            instance = spec[:, start:end]
-            
-            # Flatten to 1D feature vector
-            instance_flat = instance.flatten()
-            instances.append(instance_flat)
-        
-        # Stack instances
-        instances_tensor = torch.stack(instances)  # (bag_size, F * instance_width)
-        
-        return instances_tensor
+        frames = spec.unfold(dimension=-1, size=self.config.instance_frames, step=self.instance_hop_frames)
+        frames = frames.transpose(0, 1)  # (time, freq, instance_frames)
+        if frames.size(0) == 0:
+            frames = spec[:, : self.config.instance_frames].unsqueeze(0)
+        if frames.size(0) > self.config.bag_size:
+            indices = torch.randperm(frames.size(0))[: self.config.bag_size]
+            frames = frames.index_select(0, indices)
+        elif frames.size(0) < self.config.bag_size:
+            pad_frames = self.config.bag_size - frames.size(0)
+            padding = torch.zeros((pad_frames, frames.size(1), frames.size(2)))
+            frames = torch.cat([frames, padding], dim=0)
+        return frames
+
+    def _parse_labels(self, label_entry: str) -> torch.Tensor:
+        multi_hot = torch.zeros(len(self.label_to_index), dtype=torch.float32)
+        for label in label_entry.split(self.label_delimiter):
+            label = label.strip()
+            if not label:
+                continue
+            if label not in self.label_to_index:
+                continue  # TODO: Decide how to handle unknown labels.
+            multi_hot[self.label_to_index[label]] = 1.0
+        return multi_hot
 
 
-def collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Custom collate function to handle variable-length instances.
-    
-    Pads or truncates instances to ensure uniform batch size.
-    
-    Args:
-        batch: List of (instances, labels) tuples
-        
-    Returns:
-        Tuple of (batched_instances, batched_labels)
-        - batched_instances: (B, T, F)
-        - batched_labels: (B, C)
-    """
-    instances_list, labels_list = zip(*batch)
-    
-    # Find maximum feature dimension in batch
-    max_features = max(inst.shape[1] for inst in instances_list)
-    bag_size = instances_list[0].shape[0]
-    
-    # Pad instances to same feature dimension
-    padded_instances = []
-    for instances in instances_list:
-        if instances.shape[1] < max_features:
-            padding = max_features - instances.shape[1]
-            instances = torch.nn.functional.pad(instances, (0, padding))
-        elif instances.shape[1] > max_features:
-            instances = instances[:, :max_features]
-        padded_instances.append(instances)
-    
-    # Stack into batch
-    batched_instances = torch.stack(padded_instances)  # (B, T, F)
-    batched_labels = torch.stack(labels_list)  # (B, C)
-    
-    return batched_instances, batched_labels
+def bat_collate_fn(
+    batch: Sequence[Tuple[torch.Tensor, torch.Tensor]],
+    pad_to_bag_size: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Collate variable-length MIL bags, padding as necessary.
 
+    Returns ``(instances, labels, lengths)`` where ``instances`` has shape
+    ``(batch, bag_size, freq, frames)``.
+    """
 
-def create_dataloader(
-    csv_path: str,
-    data_dir: str,
-    config: dict,
-    train: bool = True,
-    shuffle: bool = True,
-) -> DataLoader:
-    """
-    Create DataLoader for bat audio dataset.
-    
-    Args:
-        csv_path: Path to CSV file
-        data_dir: Root directory for audio files
-        config: Configuration dictionary
-        train: Whether this is training data
-        shuffle: Whether to shuffle data
-        
-    Returns:
-        DataLoader object
-    """
-    dataset = BatClipDataset(
-        csv_path=csv_path,
-        data_dir=data_dir,
-        config=config,
-        train=train,
-    )
-    
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=shuffle,
-        num_workers=config.get('num_workers', 4),
-        collate_fn=collate_fn,
-        pin_memory=True if config['device'] == 'cuda' else False,
-    )
-    
-    return dataloader
+    instances, labels = zip(*batch)
+    lengths = torch.tensor([inst.size(0) for inst in instances], dtype=torch.long)
+    target_bag = pad_to_bag_size or max(lengths.max().item(), 1)
+    padded_instances: List[torch.Tensor] = []
+    for bag in instances:
+        if bag.size(0) < target_bag:
+            pad_amount = target_bag - bag.size(0)
+            padding = torch.zeros((pad_amount, bag.size(1), bag.size(2)))
+            bag = torch.cat([bag, padding], dim=0)
+        elif bag.size(0) > target_bag:
+            bag = bag[:target_bag]
+        padded_instances.append(bag)
+    batch_instances = torch.stack(padded_instances)
+    batch_labels = torch.stack(labels)
+    return batch_instances, batch_labels, lengths
